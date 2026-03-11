@@ -5,6 +5,7 @@ import random, hashlib, nltk, glob, os
 from itertools import combinations
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+from collections import Counter
 from nltk.stem import PorterStemmer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -23,47 +24,33 @@ def preprocess(text):
     return [stemmer.stem(w) for w in word_tokenize(text.lower()) if w.isalnum() and w not in stop_words]
 
 def get_k_shingles(words, k=2):
-    """Generate k-gram shingles from a list of words."""
     if len(words) < k:
         return words
     return [" ".join(words[i:i+k]) for i in range(len(words) - k + 1)]
 
 def load_corpus(directory="corpus"):
-    """Reads all text and CSV files from a directory into a list of strings."""
     docs = []
     
-    # Resolve the directory relative to this script's location
     base_dir = os.path.dirname(os.path.abspath(__file__))
     target_dir = os.path.join(base_dir, directory)
     
-    # Read text files
     for file in glob.glob(os.path.join(target_dir, "*.txt")):
-        with open(file, 'r', encoding='utf-8') as f:
-            docs.append(f.read().strip())
+        with open(file, 'r', encoding='utf-8') as f: docs.append(f.read().strip())
             
-    # Read CSV files (assuming one document per line/cell for simplicity of the previous data)
     for file in glob.glob(os.path.join(target_dir, "*.csv")):
-        df = pd.read_csv(file, header=None)
-        # Flattening all values in the CSV just in case
-        for row in df.values:
-            for item in row:
-                if isinstance(item, str):
-                    docs.append(item.strip())
+        docs.extend([str(item).strip() for row in pd.read_csv(file, header=None).values for item in row if isinstance(item, str)])
                     
     return docs
+
+def print_table(df, title):
+    width = max(len(title) + 4, 60)
+    print(f"\n{'=' * width}\n {title} \n{'=' * width}\n\n{df}\n\n{'-' * width}\n")
 
 def sim_df(mat, docs, title):
     df = pd.DataFrame(np.round(np.asarray(mat), 3),
                       index=[f"Doc{i}" for i in range(len(docs))],
                       columns=[f"Doc{i}" for i in range(len(docs))])
-    
-    # Calculate width based on title length for border
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(df)
-    print(f"\n{'-' * width}\n")
+    print_table(df, title)
     return df
 
 def prf(tp, fp, fn):
@@ -74,19 +61,14 @@ def prf(tp, fp, fn):
 
 def compute_minhash(shingles, docs, num_hash=50, max_shingle=1000):
     hash_funcs = [(random.randint(1, max_shingle), random.randint(0, max_shingle)) for _ in range(num_hash)]
-    vocab = list(set(word for doc in shingles for word in doc))
-    if not vocab: # Fallback for empty vocabulary edge case
-        vocab = ["empty"]
+    vocab = list(set(word for doc in shingles for word in doc)) or ["empty"]
     shingle_index = {w: i for i, w in enumerate(vocab)}
-
-    def h(x, a, b): return (a * x + b) % max_shingle
 
     signature = np.full((num_hash, len(docs)), np.inf)
     for d, doc in enumerate(shingles):
         for word in doc:
-            idx = shingle_index[word]
             for i, (a, b) in enumerate(hash_funcs):
-                signature[i, d] = min(signature[i, d], h(idx, a, b))
+                signature[i, d] = min(signature[i, d], (a * shingle_index[word] + b) % max_shingle)
     signature = signature.astype(int)
 
     minhash_sim = np.matrix([[np.mean(signature[:, i] == signature[:, j]) for j in range(len(docs))] for i in range(len(docs))])
@@ -107,17 +89,12 @@ def get_lsh_candidates(sig, bands):
                 candidates.add(tuple(sorted(pair)))
     return candidates
 
-def compute_lsh(signature, bands=10):
+def compute_lsh(signature, bands=50):
     candidates = get_lsh_candidates(signature, bands)
     lsh_df = pd.DataFrame([(f"Doc{i}", f"Doc{j}") for i, j in sorted(candidates)], columns=["Document 1", "Document 2"])
     
-    title = "LSH Candidate Pairs Table"
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(lsh_df)
-    print(f"\n{'-' * width}\n")
+    print_table(lsh_df, "LSH Candidate Pairs Table (Near Duplicates)")
+    return candidates
     
     return candidates
 
@@ -140,45 +117,28 @@ def compute_rocchio(processed_docs, docs, query="information retrieval"):
         "Updated Score": np.round(new_scores, 3)
     })
     
-    title = "Rocchio Score Table"
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(rocchio_df)
-    print(f"\n{'-' * width}\n")
+    print_table(rocchio_df, "Rocchio Score Table")
     return vectorizer, tfidf, scores, new_scores
 
 def compute_lca(processed_docs, docs, vectorizer, tfidf, scores, query="information retrieval"):
     top_k = scores.argsort()[::-1][:5]
-    term_freq = {}
-    for doc in [processed_docs[i] for i in top_k]:
-        for word in doc.split():
-            term_freq[word] = term_freq.get(word, 0) + 1
-    expanded_terms = sorted(term_freq, key=term_freq.get, reverse=True)[:5]
+    expanded_terms = [w for w, _ in Counter(word for i in top_k for word in processed_docs[i].split()).most_common(5)]
     expanded_query = " ".join(preprocess(query)) + " " + " ".join(expanded_terms)
     expanded_scores = cosine_similarity(vectorizer.transform([expanded_query]), tfidf)[0]
 
-    title1 = "LCA Expanded Query"
-    width = max(len(title1) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title1} ")
-    print(f"{'=' * width}\n")
-    print(f"  {expanded_query}  ")
-    print(f"\n{'-' * width}\n")
+    width = 60
+    print(f"\n{'=' * width}\n Query Expansion Comparison \n{'=' * width}\n")
+    print(f"Before:  {query}")
+    print(f"After :  {expanded_query}\n")
+    print(f"{'-' * width}\n")
 
     lca_df = pd.DataFrame({
         "Document": [f"Doc{i}" for i in range(len(docs))],
         "LCA Score": np.round(expanded_scores, 3)
     })
     
-    title2 = "LCA Score Table"
-    width2 = max(len(title2) + 4, 60)
-    print(f"\n{'=' * width2}")
-    print(f" {title2} ")
-    print(f"{'=' * width2}\n")
-    print(lca_df)
-    print(f"\n{'-' * width2}\n")
+    print_table(lca_df, "LCA Score Table")
+    return expanded_scores
 
 def compute_jaccard(shingles, docs):
     jaccard = lambda a, b: len(a & b) / len(a | b) if len(a | b) > 0 else 0
@@ -187,7 +147,6 @@ def compute_jaccard(shingles, docs):
     return jaccard_matrix
 
 def evaluate_prf(signature, jaccard_matrix, docs, num_hash):
-    # Reduced the threshold slightly since k-shingles reduce overlap
     threshold = 0.10 
     ground_truth = {(i, j) for i in range(len(docs)) for j in range(i + 1, len(docs)) if float(jaccard_matrix[i, j]) >= threshold}
 
@@ -203,44 +162,29 @@ def evaluate_prf(signature, jaccard_matrix, docs, num_hash):
 
     bucket_df = pd.DataFrame(bucket_rows, columns=["Bucket Size", "Candidate Pairs", "TP", "FP", "FN", "Precision", "Recall", "Fscore"])
     
-    title = "Precision Recall Fscore with Different Bucket Size"
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(bucket_df)
-    print(f"\n{'-' * width}\n")
+    print_table(bucket_df, "Precision Recall Fscore with Different Bucket Size")
     return bucket_df
 
 def evaluate_compression(signature, jaccard_matrix, docs, vocab):
     threshold = 0.10
     original_size = len(vocab) * len(docs)
+    total_pairs = len(docs) * (len(docs) - 1) // 2
     comp_rows = []
+    
     for rows_used in [10, 20, 30, 40, 50]:
         sub_sig = signature[:rows_used, :]
-        correct, total = 0, 0
-        for i in range(len(docs)):
-            for j in range(i + 1, len(docs)):
-                approx = np.mean(sub_sig[:, i] == sub_sig[:, j]) >= threshold
-                actual = float(jaccard_matrix[i, j]) >= threshold
-                correct += int(approx == actual)
-                total += 1
+        correct = sum((np.mean(sub_sig[:, i] == sub_sig[:, j]) >= threshold) == (float(jaccard_matrix[i, j]) >= threshold) 
+                      for i, j in combinations(range(len(docs)), 2))
+        
         comp_rows.append([
-            rows_used,
-            sub_sig.size,
-            round(sub_sig.size / original_size, 3) if original_size > 0 else 0,
-            round(correct / total, 3) if total > 0 else 0
+            rows_used, sub_sig.size,
+            round(sub_sig.size / original_size, 3) if original_size else 0,
+            round(correct / total_pairs, 3) if total_pairs else 0
         ])
 
     compression_df = pd.DataFrame(comp_rows, columns=["Signature Rows Used", "Signature Size", "Compression Ratio", "Accuracy"])
     
-    title = "Signature Size Compression Ratio Accuracy Table"
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(compression_df)
-    print(f"\n{'-' * width}\n")
+    print_table(compression_df, "Signature Size Compression Ratio Accuracy Table")
     return compression_df
 
 def avg_precision(score_vector, relevant_ids):
@@ -281,19 +225,11 @@ def evaluate_map(vectorizer, tfidf, docs):
 
     map_df = pd.DataFrame(map_rows, columns=["Alpha", "Beta", "Gamma", "MAP Before", "MAP After", "Percent Change in MAP"])
     
-    title = "Percent Change in Mean Average Precision on Training Queries for Different Term Reweighting"
-    width = max(len(title) + 4, 60)
-    print(f"\n{'=' * width}")
-    print(f" {title} ")
-    print(f"{'=' * width}\n")
-    print(map_df)
-    print(f"\n{'-' * width}\n")
+    print_table(map_df, "Percent Change in Mean Average Precision on Training Queries for Different Term Reweighting")
     return map_df
 
 def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, compression_df, map_df, docs, shingles):
-    """Group visualizations into logical figures instead of separate ones."""
     
-    # 0. Document Properties Group
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Corpus Properties")
     
@@ -303,7 +239,6 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
     axes[0].set_xlabel("Documents")
     axes[0].set_ylabel("Shingle Count")
     
-    # Rocchio Scores Side-by-Side Comparison
     x = np.arange(len(docs))
     width = 0.35
     axes[1].bar(x - width/2, scores, width, label='Original VSM Score')
@@ -317,7 +252,6 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
     plt.tight_layout()
     plt.show()
     
-    # 1. Similarity Group
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Document Similarities")
     
@@ -336,7 +270,6 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
     plt.tight_layout()
     plt.show()
 
-    # 2. LSH Evaluation Metrics Group
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("LSH Evaluation Metrics")
     
@@ -359,7 +292,6 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
     plt.tight_layout()
     plt.show()
 
-    # 3. Compression and Accuracy Group
     fig, ax1 = plt.subplots(figsize=(8, 5))
     ax1.set_title("MinHash Compression Ratio and Approximation Accuracy")
     
@@ -378,7 +310,6 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
     fig.tight_layout()
     plt.show()
 
-    # 4. Rocchio/LCA MAP Group
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Rocchio Relevance Feedback MAP Evaluation")
     
@@ -404,30 +335,25 @@ def plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, comp
 def main():
     setup_seeds()
 
-    # Read from relative 'corpus' directory
     docs = load_corpus("corpus")
     
     if not docs:
         print("Error: No documents found in the 'corpus/' directory.")
         return
 
-    # Use k=2 for k-shingles (2-grams)
     k_shingles = 2
     
-    # Generate words for each document first
     processed_docs_words = [preprocess(doc) for doc in docs]
     
-    # Processed docs text used by TfidfVectorizer (just space-separated stemmed words)
     processed_docs = [" ".join(words) for words in processed_docs_words]
     
-    # Generate shingles as sets of k-grams for Jaccard and MinHash
     shingles = [set(get_k_shingles(words, k=k_shingles)) for words in processed_docs_words]
 
-    signature, minhash_sim, vocab, num_hash = compute_minhash(shingles, docs)
-    compute_lsh(signature)
+    signature, minhash_sim, vocab, num_hash = compute_minhash(shingles, docs, num_hash=100)
+    compute_lsh(signature, bands=50)
     
     vectorizer, tfidf, scores, new_scores = compute_rocchio(processed_docs, docs)
-    compute_lca(processed_docs, docs, vectorizer, tfidf, scores)
+    lca_scores = compute_lca(processed_docs, docs, vectorizer, tfidf, scores)
     
     jaccard_matrix = compute_jaccard(shingles, docs)
     
@@ -436,6 +362,23 @@ def main():
     map_df = evaluate_map(vectorizer, tfidf, docs)
     
     plot_graphs(minhash_sim, jaccard_matrix, scores, new_scores, bucket_df, compression_df, map_df, docs, shingles)
+    
+    width = 60
+    print(f"\n{'*' * width}")
+    print("                     FINAL EVALUATION REPORT                  ")
+    print(f"{'*' * width}\n")
+    print(f"Corpus Size:               {len(docs)} documents")
+    print(f"Total Unique Tokens:       {len(vocab)}")
+    print(f"Average Jaccard Sim:       {np.mean(jaccard_matrix):.3f}")
+    print(f"Average MinHash Sim:       {np.mean(minhash_sim):.3f}")
+    print(f"Average Original VSM Score:{np.mean(scores):.3f}")
+    print(f"Average Rocchio Score:     {np.mean(new_scores):.3f}")
+    print(f"Average LCA Score:         {np.mean(lca_scores):.3f}")
+    print("\nLSH Configuration Details")
+    print(f"   Hashes Generated:       {num_hash}")
+    print(f"   Bands Evaluated:        50")
+    print(f"   Rows per Band:          {num_hash // 50}")
+    print(f"\n{'*' * width}\n")
 
 if __name__ == "__main__":
     main()
