@@ -1,0 +1,1 @@
+inverted index is widely used in information retrieval
